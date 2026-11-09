@@ -1,0 +1,8 @@
+# Esta carpeta sólo admite la entrega pública cifrada.
+*.log
+*.tmp
+*.part
+acceso.txt
+acceso.json
+__pycache__/
+.DS_Store

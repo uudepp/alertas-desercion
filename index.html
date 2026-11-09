@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="referrer" content="no-referrer">
+  <meta name="robots" content="noindex, nofollow, noarchive">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; connect-src 'self'; worker-src 'self'; frame-src 'self'; base-uri 'none'; form-action 'none'; object-src 'none'">
+  <title>Acceso a las fichas - UDEP</title>
+  <link rel="stylesheet" href="acceso.css">
+  <script src="acceso.js" defer></script>
+</head>
+<body>
+  <main id="access-view" class="access-view">
+    <section class="access-panel" aria-labelledby="access-title">
+      <img class="brand" src="logo_udep.png" alt="Universidad de Piura">
+      <p class="eyebrow">Consulta de fichas de riesgo</p>
+      <h1 id="access-title">Acceso autorizado</h1>
+      <p class="lead">Ingresa la contraseña para consultar la probabilidad de no matrícula y los factores asociados al riesgo de cada estudiante.</p>
+      <form id="access-form" autocomplete="off">
+        <label for="password">Contraseña</label>
+        <input id="password" name="password" type="password" required autocomplete="off" spellcheck="false" autocapitalize="none" aria-describedby="access-status">
+        <button id="unlock" type="submit" disabled>Ingresar</button>
+      </form>
+      <p id="access-status" class="status" role="status" aria-live="polite">Preparando el acceso seguro…</p>
+      <p class="access-note">La información se abre en este navegador. Al terminar, utiliza «Cerrar sesión», especialmente en un equipo compartido.</p>
+      <noscript>Activa JavaScript para acceder a las fichas.</noscript>
+    </section>
+  </main>
+  <section id="application-view" class="application-view" aria-label="Fichas de estudiantes" hidden>
+    <div class="session-bar">
+      <span>UDEP - Consulta de fichas</span>
+      <button id="logout" type="button">Cerrar sesión</button>
+    </div>
+    <iframe id="application" title="Fichas de riesgo de no matrícula" sandbox="allow-scripts allow-same-origin" referrerpolicy="no-referrer"></iframe>
+  </section>
+</body>
+</html>
