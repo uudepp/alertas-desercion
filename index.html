@@ -22,7 +22,7 @@
         <input id="password" name="password" type="password" required autocomplete="off" spellcheck="false" autocapitalize="none" aria-describedby="access-status">
         <button id="unlock" type="submit" disabled>Ingresar</button>
       </form>
-      <p id="access-status" class="status" role="status" aria-live="polite">Preparando el acceso seguro…</p>
+      <p id="access-status" class="status loading" role="status" aria-live="polite">Preparando el acceso seguro…</p>
       <p class="access-note">La información se abre en este navegador. Al terminar, utiliza «Cerrar sesión», especialmente en un equipo compartido.</p>
       <noscript>Activa JavaScript para acceder a las fichas.</noscript>
     </section>
@@ -32,6 +32,7 @@
       <span>UDEP - Consulta de fichas</span>
       <button id="logout" type="button">Cerrar sesión</button>
     </div>
+    <div id="application-loading" class="application-loading" role="status" aria-live="polite" hidden><span class="loading-wheel" aria-hidden="true"></span><strong>Cargando información…</strong></div>
     <iframe id="application" title="Fichas de riesgo de no matrícula" sandbox="allow-scripts allow-same-origin allow-downloads" referrerpolicy="no-referrer"></iframe>
   </section>
 </body>
