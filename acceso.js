@@ -10,25 +10,10 @@ let registration = null;
 let ready = false;
 let busy = false;
 
-function status(message, error = false, loading = false) {
+function status(message, error = false) {
   $('access-status').textContent = message;
   $('access-status').classList.toggle('error', error);
-  $('access-status').classList.toggle('loading', loading);
 }
-
-function applicationLoading(value) {
-  $('application-loading').hidden = !value;
-  $('application').setAttribute('aria-busy', String(value));
-}
-$('application').addEventListener('load', () => {
-  applicationLoading(false);
-  // Mismo origen: también cubre la navegación entre lista y fichas.
-  try {
-    $('application').contentWindow.addEventListener('beforeunload', () => {
-      if (currentSession) applicationLoading(true);
-    });
-  } catch (_) { /* La página de acceso conserva su indicador inicial. */ }
-});
 
 function clearOriginalViewState() {
   // Las fichas originales conservan filtros en sessionStorage; pueden contener búsquedas.
@@ -113,7 +98,7 @@ async function unlock(event) {
   $('unlock').disabled = true;
   let password = $('password').value;
   $('password').value = '';
-  status('Abriendo la información…', false, true);
+  status('Abriendo la información…');
   try {
     const config = JSON.parse(new TextDecoder().decode(await requestBytes('config.json')));
     if (config.version !== 1 || config.iterations !== 600000 || config.manifest !== 'manifest.enc') throw new Error('config');
@@ -125,14 +110,12 @@ async function unlock(event) {
     const manifest = await openManifest(key);
     currentSession = {key, manifest};
     await workerMessage({type: 'UDEP_SET_SESSION', key, manifest});
-    applicationLoading(true);
     $('application').src = new URL('app/' + manifest.entry, BASE).href;
     $('access-view').hidden = true;
     $('application-view').hidden = false;
     status('');
     document.title = 'Fichas de riesgo - UDEP';
   } catch (_) {
-    applicationLoading(false);
     currentSession = null;
     try { await workerMessage({type: 'UDEP_CLEAR_SESSION'}); } catch (_) { /* Sin sesión utilizable. */ }
     status('No se pudo abrir la información. Revisa la contraseña y tu conexión e inténtalo nuevamente.', true);
@@ -145,7 +128,6 @@ async function unlock(event) {
 }
 
 async function lock(message = 'Sesión cerrada.') {
-  applicationLoading(false);
   currentSession = null;
   $('password').value = '';
   $('application').removeAttribute('src');
