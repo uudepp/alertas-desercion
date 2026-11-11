@@ -33,6 +33,7 @@ function installPageTransitions() {
   host.append(indicator);
   let pending = null;
   let expiry = null;
+  let attachedDocument = null;
   function hide() {
     clearTimeout(pending);
     clearTimeout(expiry);
@@ -49,19 +50,23 @@ function installPageTransitions() {
       expiry = setTimeout(hide, 60000);
     }, 120);
   }
-  frame.addEventListener('load', () => {
+  function attachNavigation() {
     hide();
     try {
       const child = frame.contentWindow;
       const url = new URL(child.location.href);
       const app = new URL('app/', BASE);
       if (!currentSession || url.origin !== app.origin || !url.pathname.startsWith(app.pathname)) return;
+      if (attachedDocument === child.document) return;
+      attachedDocument = child.document;
       // beforeunload no se dispara al filtrar, desplegar o cambiar de pestaña
       // dentro de la misma ficha; tampoco se interceptan enlaces ni clics.
       child.addEventListener('beforeunload', show);
       child.addEventListener('pageshow', hide);
     } catch (_) { /* Sin acceso al documento: el indicador queda oculto. */ }
-  });
+  }
+  frame.addEventListener('load', attachNavigation);
+  frame.addEventListener('udep-view-ready', attachNavigation);
   frame.addEventListener('error', hide);
   window.addEventListener('pagehide', hide);
   return hide;
@@ -155,33 +160,51 @@ function openApplication(entry) {
   const frame = $('application');
   const target = new URL('app/' + entry, BASE);
   const openingSession = currentSession;
+  const previousDocument = frame.contentDocument;
   return new Promise((resolve, reject) => {
     let timer;
+    let polling;
+    let settled = false;
     function finish(error) {
+      if (settled) return;
+      settled = true;
       clearTimeout(timer);
+      clearInterval(polling);
       frame.removeEventListener('load', loaded);
       frame.removeEventListener('error', failed);
       cancelApplicationOpen = () => {};
       if (error) reject(error);
-      else resolve();
+      else {
+        // Permite navegar con indicador aunque alguna imagen siga pendiente.
+        frame.dispatchEvent(new Event('udep-view-ready'));
+        resolve();
+      }
     }
     function failed() { finish(new Error('application')); }
-    function loaded() {
+    function checkReady(completed = false) {
       try {
         if (!openingSession || currentSession !== openingSession) return failed();
         const child = frame.contentWindow;
-        if (child.location.href === 'about:blank') return;
-        if (child.location.origin !== target.origin || child.location.pathname !== target.pathname) return failed();
-        // El formulario permanece visible hasta que la aplicación se haya
-        // inicializado, no sólo hasta que se haya descargado su documento.
-        if (!child.document.querySelector('#home-view:not([hidden]), #list-view:not([hidden]), #detail-view:not([hidden])')) return failed();
+        if (child.document === previousDocument || child.location.href === 'about:blank') return;
+        if (child.location.origin !== target.origin || child.location.pathname !== target.pathname) {
+          if (completed) failed();
+          return;
+        }
+        // Esperar la vista inicializada, sin retrasarla por imágenes pendientes.
+        // El documento anterior nunca sirve como señal de que terminó la carga.
+        if (!child.document.querySelector('#home-view:not([hidden]), #list-view:not([hidden]), #detail-view:not([hidden])')) {
+          if (completed) failed();
+          return;
+        }
         finish();
       } catch (_) { failed(); }
     }
+    function loaded() { checkReady(true); }
     frame.addEventListener('load', loaded);
     frame.addEventListener('error', failed);
     cancelApplicationOpen = failed;
     timer = setTimeout(failed, 60000);
+    polling = setInterval(checkReady, 50);
     try { frame.src = target.href; } catch (_) { failed(); }
   });
 }
