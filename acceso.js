@@ -10,6 +10,7 @@ let registration = null;
 let ready = false;
 let busy = false;
 let hidePageTransition = () => {};
+let cancelApplicationOpen = () => {};
 
 // Indicador opcional: sólo navegación de un documento ya abierto, nunca login.
 // Se crea aquí para no depender de elementos de otra versión del HTML.
@@ -150,6 +151,41 @@ async function openManifest(key) {
   return manifest;
 }
 
+function openApplication(entry) {
+  const frame = $('application');
+  const target = new URL('app/' + entry, BASE);
+  const openingSession = currentSession;
+  return new Promise((resolve, reject) => {
+    let timer;
+    function finish(error) {
+      clearTimeout(timer);
+      frame.removeEventListener('load', loaded);
+      frame.removeEventListener('error', failed);
+      cancelApplicationOpen = () => {};
+      if (error) reject(error);
+      else resolve();
+    }
+    function failed() { finish(new Error('application')); }
+    function loaded() {
+      try {
+        if (!openingSession || currentSession !== openingSession) return failed();
+        const child = frame.contentWindow;
+        if (child.location.href === 'about:blank') return;
+        if (child.location.origin !== target.origin || child.location.pathname !== target.pathname) return failed();
+        // El formulario permanece visible hasta que la aplicación se haya
+        // inicializado, no sólo hasta que se haya descargado su documento.
+        if (!child.document.querySelector('#home-view:not([hidden]), #list-view:not([hidden]), #detail-view:not([hidden])')) return failed();
+        finish();
+      } catch (_) { failed(); }
+    }
+    frame.addEventListener('load', loaded);
+    frame.addEventListener('error', failed);
+    cancelApplicationOpen = failed;
+    timer = setTimeout(failed, 60000);
+    try { frame.src = target.href; } catch (_) { failed(); }
+  });
+}
+
 async function unlock(event) {
   event.preventDefault();
   if (!ready || busy) return;
@@ -169,13 +205,16 @@ async function unlock(event) {
     const manifest = await openManifest(key);
     currentSession = {key, manifest};
     await workerMessage({type: 'UDEP_SET_SESSION', key, manifest});
-    $('application').src = new URL('app/' + manifest.entry, BASE).href;
+    await openApplication(manifest.entry);
     $('access-view').hidden = true;
     $('application-view').hidden = false;
     status('');
     document.title = 'Fichas de riesgo - UDEP';
   } catch (_) {
     currentSession = null;
+    $('application').removeAttribute('src');
+    $('application-view').hidden = true;
+    $('access-view').hidden = false;
     try { await workerMessage({type: 'UDEP_CLEAR_SESSION'}); } catch (_) { /* Sin sesión utilizable. */ }
     status('No se pudo abrir la información. Revisa la contraseña y tu conexión e inténtalo nuevamente.', true);
     $('password').focus();
@@ -187,6 +226,7 @@ async function unlock(event) {
 }
 
 async function lock(message = 'Sesión cerrada.') {
+  cancelApplicationOpen();
   hidePageTransition();
   currentSession = null;
   $('password').value = '';
