@@ -9,6 +9,65 @@ let currentSession = null;
 let registration = null;
 let ready = false;
 let busy = false;
+let hidePageTransition = () => {};
+
+// Indicador opcional: sólo navegación de un documento ya abierto, nunca login.
+// Se crea aquí para no depender de elementos de otra versión del HTML.
+function installPageTransitions() {
+  const frame = $('application');
+  const host = $('application-view');
+  if (!frame || !host) return () => {};
+  const indicator = document.createElement('div');
+  indicator.id = 'page-transition';
+  indicator.className = 'page-transition';
+  indicator.hidden = true;
+  indicator.setAttribute('role', 'status');
+  indicator.setAttribute('aria-live', 'polite');
+  const wheel = document.createElement('span');
+  wheel.className = 'page-transition-wheel';
+  wheel.setAttribute('aria-hidden', 'true');
+  const label = document.createElement('span');
+  label.textContent = 'Cargando página…';
+  indicator.append(wheel, label);
+  host.append(indicator);
+  let pending = null;
+  let expiry = null;
+  function hide() {
+    clearTimeout(pending);
+    clearTimeout(expiry);
+    indicator.hidden = true;
+  }
+  function show() {
+    hide();
+    if (!currentSession || host.hidden) return;
+    // Evita destellos si la página siguiente abre inmediatamente.
+    pending = setTimeout(() => {
+      if (!currentSession || host.hidden) return;
+      indicator.hidden = false;
+      // Una navegación cancelada o sin respuesta no deja un aviso perpetuo.
+      expiry = setTimeout(hide, 60000);
+    }, 120);
+  }
+  frame.addEventListener('load', () => {
+    hide();
+    try {
+      const child = frame.contentWindow;
+      const url = new URL(child.location.href);
+      const app = new URL('app/', BASE);
+      if (!currentSession || url.origin !== app.origin || !url.pathname.startsWith(app.pathname)) return;
+      // beforeunload no se dispara al filtrar, desplegar o cambiar de pestaña
+      // dentro de la misma ficha; tampoco se interceptan enlaces ni clics.
+      child.addEventListener('beforeunload', show);
+      child.addEventListener('pageshow', hide);
+    } catch (_) { /* Sin acceso al documento: el indicador queda oculto. */ }
+  });
+  frame.addEventListener('error', hide);
+  window.addEventListener('pagehide', hide);
+  return hide;
+}
+
+try { hidePageTransition = installPageTransitions(); }
+catch (_) { /* La presentación nunca debe impedir el acceso a las fichas. */ }
 
 function status(message, error = false) {
   $('access-status').textContent = message;
@@ -128,6 +187,7 @@ async function unlock(event) {
 }
 
 async function lock(message = 'Sesión cerrada.') {
+  hidePageTransition();
   currentSession = null;
   $('password').value = '';
   $('application').removeAttribute('src');
