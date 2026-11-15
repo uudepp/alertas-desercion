@@ -8,6 +8,75 @@ let session = null;
 let restoring = null;
 let generation = 0;
 
+// Sólo recursos compartidos de la entrega inmutable, durante la sesión abierta.
+// Nunca HTML de fichas, claves ni contenido persistido; las respuestas mantienen no-store.
+const SHARED_RESOURCES = new Set([
+  'fichas/recursos/config.js', 'fichas/recursos/interfaz.js',
+  'fichas/recursos/estilos.css', 'fichas/recursos/logo_udep.png',
+]);
+const RESOURCE_CACHE_LIMIT = 64 * 1024 * 1024;
+const RESOURCE_ITEM_LIMIT = 48 * 1024 * 1024;
+const resourceCache = new Map();
+const resourcePending = new Map();
+let resourceCacheBytes = 0;
+
+function clearResourceCache() {
+  for (const item of resourcePending.values()) item.controller.abort();
+  resourcePending.clear();
+  resourceCache.clear();
+  resourceCacheBytes = 0;
+}
+
+function assertActive(active, atStart) {
+  if (generation !== atStart || session !== active) throw new Error('session-ended');
+}
+
+function rememberResource(key, bytes) {
+  if (bytes.byteLength > RESOURCE_ITEM_LIMIT || bytes.byteLength > RESOURCE_CACHE_LIMIT) return;
+  while (resourceCacheBytes + bytes.byteLength > RESOURCE_CACHE_LIMIT && resourceCache.size) {
+    const oldest = resourceCache.keys().next().value;
+    resourceCacheBytes -= resourceCache.get(oldest).byteLength;
+    resourceCache.delete(oldest);
+  }
+  resourceCache.set(key, bytes);
+  resourceCacheBytes += bytes.byteLength;
+}
+
+async function sharedResource(path, item, active, atStart) {
+  assertActive(active, atStart);
+  const cacheKey = path + '\0' + item.blob;
+  const cached = resourceCache.get(cacheKey);
+  if (cached) {
+    resourceCache.delete(cacheKey);
+    resourceCache.set(cacheKey, cached);
+    return cached;
+  }
+  if (resourcePending.has(cacheKey)) return resourcePending.get(cacheKey).promise;
+  const controller = new AbortController();
+  const pending = (async () => {
+    const response = await fetch(new URL(item.blob, BASE), {
+      cache: 'no-store', credentials: 'omit', referrerPolicy: 'no-referrer', signal: controller.signal,
+    });
+    if (!response.ok) throw new Error('file');
+    const bytes = new Uint8Array(await response.arrayBuffer());
+    if (bytes.byteLength < 29) throw new Error('file');
+    assertActive(active, atStart);
+    const compressed = await crypto.subtle.decrypt({name: 'AES-GCM', iv: bytes.subarray(0, 12), additionalData: encoder.encode('udep-file-v1:' + path), tagLength: 128}, active.key, bytes.subarray(12));
+    assertActive(active, atStart);
+    const stream = new Blob([compressed]).stream().pipeThrough(new DecompressionStream('gzip'));
+    const plain = new Uint8Array(await new Response(stream).arrayBuffer());
+    assertActive(active, atStart);
+    rememberResource(cacheKey, plain);
+    return plain;
+  })();
+  resourcePending.set(cacheKey, {promise: pending, controller});
+  try { return await pending; }
+  finally {
+    // Una solicitud antigua no puede borrar la de una sesión nueva.
+    if (resourcePending.get(cacheKey)?.promise === pending) resourcePending.delete(cacheKey);
+  }
+}
+
 const APP_CSP = "default-src 'none'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self'; frame-src 'self'; frame-ancestors 'self'; base-uri 'self'; form-action 'none'; object-src 'none'";
 
 self.addEventListener('install', event => event.waitUntil(self.skipWaiting()));
@@ -20,7 +89,13 @@ self.addEventListener('activate', event => event.waitUntil((async () => {
 function isAccessClient(client) {
   if (!client?.url) return false;
   const url = new URL(client.url);
-  return url.origin === BASE.origin && (url.pathname === BASE.pathname || url.pathname === BASE.pathname + 'index.html');
+  return url.origin === BASE.origin && (url.pathname === BASE.pathname || url.pathname === BASE.pathname + 'index.html' || isStudentAddress(url));
+}
+
+function isStudentAddress(url) {
+  if (url.origin !== BASE.origin || !url.pathname.startsWith(BASE.pathname)) return false;
+  const match = /^([A-Za-z0-9_.-]+)\/(\d{4}-(?:I|II))\/?$/.exec(url.pathname.slice(BASE.pathname.length));
+  return Boolean(match && !match[1].includes('..'));
 }
 
 function validVirtualPath(path) {
@@ -41,6 +116,7 @@ self.addEventListener('message', event => {
   const data = event.data;
   if (data?.type === 'UDEP_CLEAR_SESSION') {
     generation++;
+    clearResourceCache();
     session = null;
     restoring = null;
     event.ports[0]?.postMessage({ok: true});
@@ -48,6 +124,8 @@ self.addEventListener('message', event => {
     try {
       validateSession(data.key, data.manifest);
       generation++;
+      clearResourceCache();
+      restoring = null;
       session = {key: data.key, manifest: data.manifest, owner: event.source.id};
       event.ports[0]?.postMessage({ok: true});
     } catch (_) { event.ports[0]?.postMessage({ok: false}); }
@@ -72,7 +150,13 @@ function askClient(client) {
 
 async function getSession() {
   if (session) {
-    if (await self.clients.get(session.owner)) return session;
+    const active = session;
+    const owner = await self.clients.get(active.owner);
+    // La comprobación de un propietario anterior no invalida una sesión nueva.
+    if (session !== active) return getSession();
+    if (owner) return active;
+    generation++;
+    clearResourceCache();
     session = null;
   }
   if (restoring) return restoring;
@@ -120,6 +204,11 @@ async function serveProtected(request) {
   if (!item) return lockedResponse(request, 404);
   const atStart = generation;
   try {
+    if (SHARED_RESOURCES.has(path)) {
+      const plain = await sharedResource(path, item, active, atStart);
+      assertActive(active, atStart);
+      return new Response(request.method === 'HEAD' ? null : plain, {status: 200, headers: protectedHeaders(item.mime)});
+    }
     // Solo se solicita al servidor un nombre opaco de archivo cifrado. Nunca el DNI.
     const response = await fetch(new URL(item.blob, BASE), {cache: 'no-store', credentials: 'omit', referrerPolicy: 'no-referrer'});
     if (!response.ok) throw new Error('file');
@@ -129,7 +218,9 @@ async function serveProtected(request) {
     if (atStart !== generation || session !== active) return lockedResponse(request);
     const stream = new Blob([compressed]).stream().pipeThrough(new DecompressionStream('gzip'));
     return new Response(request.method === 'HEAD' ? null : stream, {status: 200, headers: protectedHeaders(item.mime)});
-  } catch (_) { return lockedResponse(request, 503); }
+  } catch (_) {
+    return lockedResponse(request, atStart !== generation || session !== active ? 401 : 503);
+  }
 }
 
 self.addEventListener('fetch', event => {
@@ -137,5 +228,11 @@ self.addEventListener('fetch', event => {
   if (url.origin === APP.origin && url.pathname.startsWith(APP.pathname)) {
     // Esta rama siempre responde localmente; no existe fallback de red para rutas personales.
     event.respondWith(serveProtected(event.request));
+  } else if (event.request.mode === 'navigate' && isStudentAddress(url)) {
+    // La recarga abre sólo la pantalla pública de acceso. Las fichas siguen cifradas.
+    // Sin worker instalado, GitHub Pages sirve esa misma pantalla mediante 404.html.
+    event.respondWith(fetch(new URL('index.html', BASE), {
+      cache: 'no-store', credentials: 'omit', referrerPolicy: 'no-referrer',
+    }));
   }
 });

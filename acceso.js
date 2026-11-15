@@ -1,8 +1,9 @@
 'use strict';
 
 // El secreto y el índice descifrado viven únicamente en la memoria de esta página.
-const BASE = new URL('./', location.href);
-const SW_URL = new URL('sw.js', BASE);
+// Los enlaces directos pueden abrir /DNI/ciclo; los recursos siguen en la raíz.
+const BASE = new URL('./', document.currentScript.src);
+const SW_URL = new URL('sw.js?v=91cc59583523e7e1', BASE);
 const encoder = new TextEncoder();
 const $ = id => document.getElementById(id);
 let currentSession = null;
@@ -11,6 +12,35 @@ let ready = false;
 let busy = false;
 let hidePageTransition = () => {};
 let cancelApplicationOpen = () => {};
+
+function studentRoute(url) {
+  if (url.origin !== BASE.origin || !url.pathname.startsWith(BASE.pathname)) return null;
+  const match = /^([A-Za-z0-9_.-]+)\/(\d{4}-(?:I|II))\/?$/.exec(url.pathname.slice(BASE.pathname.length));
+  return match && !match[1].includes('..') ? {document: match[1], period: match[2]} : null;
+}
+
+function entryFromAddress(url = new URL(location.href)) {
+  const route = studentRoute(url);
+  const path = route ? `fichas/${route.document}/${route.period}.html` : 'fichas_alumnos.html';
+  return path + url.search + url.hash;
+}
+
+function syncVisibleAddress() {
+  if (!currentSession) return;
+  try {
+    const child = new URL($('application').contentWindow.location.href);
+    const app = new URL('app/', BASE);
+    if (child.origin !== app.origin || !child.pathname.startsWith(app.pathname)) return;
+    const entry = child.pathname.slice(app.pathname.length);
+    if (!Object.hasOwn(currentSession.manifest.files, entry)) return;
+    const match = /^fichas\/([A-Za-z0-9_.-]+)\/(\d{4}-(?:I|II))\.html$/.exec(entry);
+    if (!match && entry !== 'fichas_alumnos.html') return;
+    const visible = new URL(match ? `${match[1]}/${match[2]}` : './', BASE);
+    visible.search = child.search;
+    visible.hash = child.hash;
+    if (location.href !== visible.href) history.replaceState(history.state, '', visible.href);
+  } catch (_) { /* Una navegación incompleta no modifica la dirección. */ }
+}
 
 // Indicador opcional: sólo navegación de un documento ya abierto, nunca login.
 // Se crea aquí para no depender de elementos de otra versión del HTML.
@@ -57,12 +87,16 @@ function installPageTransitions() {
       const url = new URL(child.location.href);
       const app = new URL('app/', BASE);
       if (!currentSession || url.origin !== app.origin || !url.pathname.startsWith(app.pathname)) return;
+      syncVisibleAddress();
       if (attachedDocument === child.document) return;
       attachedDocument = child.document;
       // beforeunload no se dispara al filtrar, desplegar o cambiar de pestaña
       // dentro de la misma ficha; tampoco se interceptan enlaces ni clics.
       child.addEventListener('beforeunload', show);
-      child.addEventListener('pageshow', hide);
+      child.addEventListener('pageshow', () => { hide(); syncVisibleAddress(); });
+      child.addEventListener('hashchange', syncVisibleAddress);
+      child.addEventListener('popstate', syncVisibleAddress);
+      child.document.addEventListener('click', () => queueMicrotask(syncVisibleAddress));
     } catch (_) { /* Sin acceso al documento: el indicador queda oculto. */ }
   }
   frame.addEventListener('load', attachNavigation);
@@ -113,11 +147,27 @@ async function startWorker() {
     throw new Error('unsupported');
   }
   registration = await navigator.serviceWorker.register(SW_URL.href, {scope: BASE.href, updateViaCache: 'none'});
-  if (navigator.serviceWorker.controller?.scriptURL !== SW_URL.href) {
+  // Una sesión anterior puede estar controlada por un worker con la misma URL,
+  // pero sin soporte para la dirección visible. Esperar la actualización activa.
+  const expectedWorker = registration.installing || registration.waiting || registration.active;
+  if (expectedWorker && expectedWorker.state !== 'activated') {
+    await new Promise((resolve, reject) => {
+      const timer = setTimeout(() => { expectedWorker.removeEventListener('statechange', check); reject(new Error('worker')); }, 20000);
+      function check() {
+        if (!['activated', 'redundant'].includes(expectedWorker.state)) return;
+        clearTimeout(timer);
+        expectedWorker.removeEventListener('statechange', check);
+        expectedWorker.state === 'activated' ? resolve() : reject(new Error('worker'));
+      }
+      expectedWorker.addEventListener('statechange', check);
+      check();
+    });
+  }
+  if (navigator.serviceWorker.controller?.scriptURL !== SW_URL.href || (expectedWorker && navigator.serviceWorker.controller !== expectedWorker)) {
     await new Promise((resolve, reject) => {
       const timer = setTimeout(() => { navigator.serviceWorker.removeEventListener('controllerchange', check); reject(new Error('worker')); }, 20000);
       function check() {
-        if (navigator.serviceWorker.controller?.scriptURL !== SW_URL.href) return;
+        if (navigator.serviceWorker.controller?.scriptURL !== SW_URL.href || (expectedWorker && navigator.serviceWorker.controller !== expectedWorker)) return;
         clearTimeout(timer);
         navigator.serviceWorker.removeEventListener('controllerchange', check);
         resolve();
@@ -228,18 +278,21 @@ async function unlock(event) {
     const manifest = await openManifest(key);
     currentSession = {key, manifest};
     await workerMessage({type: 'UDEP_SET_SESSION', key, manifest});
-    await openApplication(manifest.entry);
+    const entry = entryFromAddress();
+    const requested = new URL(entry, new URL('app/', BASE)).pathname.slice(new URL('app/', BASE).pathname.length);
+    if (!Object.hasOwn(manifest.files, requested)) throw new Error('route');
+    await openApplication(entry);
     $('access-view').hidden = true;
     $('application-view').hidden = false;
     status('');
     document.title = 'Fichas de riesgo - UDEP';
-  } catch (_) {
+  } catch (error) {
     currentSession = null;
     $('application').removeAttribute('src');
     $('application-view').hidden = true;
     $('access-view').hidden = false;
     try { await workerMessage({type: 'UDEP_CLEAR_SESSION'}); } catch (_) { /* Sin sesión utilizable. */ }
-    status('No se pudo abrir la información. Revisa la contraseña y tu conexión e inténtalo nuevamente.', true);
+    status(error.message === 'route' ? 'No existe una ficha disponible para esta dirección.' : 'No se pudo abrir la información. Revisa la contraseña y tu conexión e inténtalo nuevamente.', true);
     $('password').focus();
   } finally {
     password = '';
@@ -257,6 +310,7 @@ async function lock(message = 'Sesión cerrada.') {
   $('application-view').hidden = true;
   $('access-view').hidden = false;
   clearOriginalViewState();
+  history.replaceState(null, '', BASE.href);
   document.title = 'Acceso a las fichas - UDEP';
   try { await workerMessage({type: 'UDEP_CLEAR_SESSION'}); } catch (_) { /* Sin clave en esta página. */ }
   status(message);
